@@ -526,6 +526,109 @@ enc_comma(Encoder* e)
 }
 
 #if MAP_TYPE_PRESENT
+
+int
+is_elixir_struct(ErlNifEnv* env, ERL_NIF_TERM map, ERL_NIF_TERM struct_type) {
+
+    ErlNifMapIterator iter;
+    size_t size;
+
+    ERL_NIF_TERM struct_key = enif_make_atom(env, "__struct__");
+    ERL_NIF_TERM key;
+    ERL_NIF_TERM val;
+
+    if(!enif_get_map_size(env, map, &size)) {
+        return 0;
+    }
+    if(size == 0) {
+        return 0;
+    }
+    if(!enif_map_iterator_create(env, map, &iter, ERL_NIF_MAP_ITERATOR_HEAD)) {
+        return 0;
+    }
+
+    if(!enif_map_iterator_get_pair(env, &iter, &key, &val)) {
+        enif_map_iterator_destroy(env, &iter);
+        return 0;
+    }
+
+    if(enif_is_identical(struct_key, key) && enif_is_identical(struct_type, val)) {
+        enif_map_iterator_destroy(env, &iter);
+        return 1;
+    }
+
+    enif_map_iterator_destroy(env, &iter);
+    return 0;
+}
+
+int
+enc_mapset_to_ejson(ErlNifEnv* env, ERL_NIF_TERM map, ERL_NIF_TERM* out)
+{
+    ErlNifMapIterator iter;
+    size_t size;
+
+    ERL_NIF_TERM list;
+    ERL_NIF_TERM key;
+    ERL_NIF_TERM val;
+
+    int is_mapset = 0;
+
+    if(!enif_get_map_size(env, map, &size)) {
+        return 0;
+    }
+
+    list = enif_make_list(env, 0);
+
+    if(size == 0) {
+        *out = list;
+        return 1;
+    }
+
+    if(!enif_map_iterator_create(env, map, &iter, ERL_NIF_MAP_ITERATOR_HEAD)) {
+        return 0;
+    }
+
+    do {
+        if(!enif_map_iterator_get_pair(env, &iter, &key, &val)) {
+            enif_map_iterator_destroy(env, &iter);
+            return 0;
+        }
+
+        ERL_NIF_TERM struct_key = enif_make_atom(env, "__struct__");
+        ERL_NIF_TERM mapset_value = enif_make_atom(env, "Elixir.MapSet");
+        ERL_NIF_TERM mapset_map = enif_make_atom(env, "map");
+
+        if(enif_is_identical(struct_key, key) && enif_is_identical(mapset_value, val)) {
+            is_mapset = 1;
+            continue;
+        }
+
+        if(is_mapset && enif_is_identical(key, mapset_map)) {
+            ErlNifMapIterator mapset_iter;
+
+            if(!enif_get_map_size(env, val, &size) || size == 0) {
+                break;
+            }
+
+            enif_map_iterator_create(env, val, &mapset_iter, ERL_NIF_MAP_ITERATOR_HEAD);
+            do {
+                if(!enif_map_iterator_get_pair(env, &mapset_iter, &key, &val)) {
+                    break;
+                }
+                list = enif_make_list_cell(env, key, list);
+            } while(enif_map_iterator_next(env, &mapset_iter));
+
+            enif_map_iterator_destroy(env, &mapset_iter);
+            break;
+        }
+    } while(enif_map_iterator_next(env, &iter));
+
+    enif_map_iterator_destroy(env, &iter);
+
+    *out = list;
+    return 1;
+}
+
 int
 enc_map_to_ejson(ErlNifEnv* env, ERL_NIF_TERM map, ERL_NIF_TERM* out)
 {
@@ -557,6 +660,7 @@ enc_map_to_ejson(ErlNifEnv* env, ERL_NIF_TERM map, ERL_NIF_TERM* out)
             enif_map_iterator_destroy(env, &iter);
             return 0;
         }
+
         tuple = enif_make_tuple2(env, key, val);
         list = enif_make_list_cell(env, tuple, list);
     } while(enif_map_iterator_next(env, &iter));
@@ -824,7 +928,35 @@ encode_iter(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             stack = enif_make_list_cell(env, tuple[1], stack);
 #if MAP_TYPE_PRESENT
         } else if(enif_is_map(env, curr)) {
-            if(!enc_map_to_ejson(env, curr, &curr)) {
+            ERL_NIF_TERM mapset = enif_make_atom(env, "Elixir.MapSet");
+            if(is_elixir_struct(env, curr, mapset)) {
+
+                if(!enc_mapset_to_ejson(env, curr, &curr)) {
+                    ret = enc_error(e, "internal_error mapset");
+                    goto done;
+                }
+
+                if(!enc_start_array(e)) {
+                    ret = enc_error(e, "internal_error");
+                    goto done;
+                }
+                if(enif_is_empty_list(env, curr)) {
+                    if(!enc_end_array(e)) {
+                        ret = enc_error(e, "internal_error");
+                        goto done;
+                    }
+                    continue;
+                }
+                if(!enif_get_list_cell(env, curr, &item, &curr)) {
+                    ret = enc_error(e, "internal_error");
+                    goto done;
+                }
+                stack = enif_make_list_cell(env, curr, stack);
+                stack = enif_make_list_cell(env, e->atoms->ref_array, stack);
+                stack = enif_make_list_cell(env, item, stack);
+
+                continue;
+            } else if(!enc_map_to_ejson(env, curr, &curr)) {
                 ret = enc_error(e, "internal_error");
                 goto done;
             }
